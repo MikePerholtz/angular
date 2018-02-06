@@ -26,7 +26,7 @@ aio-nav-menu {
   }
 }
 
-md-sidenav.mat-sidenav.sidenav {
+mat-sidenav.mat-sidenav.sidenav {
   position: fixed;
   top: 64px;
   bottom: 0;
@@ -35,14 +35,13 @@ md-sidenav.mat-sidenav.sidenav {
   min-width: 260px;
   background-color: $offwhite;
   box-shadow: 6px 0 6px rgba(0,0,0,0.10);
-  height: calc(100vh - 64px);
 
   &.collapsed {
     top: 56px;
   }
 }
 
-md-sidenav-container.sidenav-container {
+mat-sidenav-container.sidenav-container {
     min-height: 100%;
     height: auto !important;
     max-width: 100%;
@@ -54,7 +53,7 @@ md-sidenav-container.sidenav-container {
     }
 }
 
-md-sidenav-container div.mat-sidenav-content {
+mat-sidenav-container div.mat-sidenav-content {
     height: auto;
 }
 
@@ -176,7 +175,7 @@ aio-nav-menu.top-menu {
 }
 
 // Angular Version Selector
-md-sidenav .doc-version {
+mat-sidenav .doc-version {
   padding: 8px;
   border-top: 1px solid $lightgray;
 

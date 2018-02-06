@@ -9,7 +9,7 @@
 import {beforeEach, describe, expect, it} from '@angular/core/testing/src/testing_internal';
 import {FormBuilder} from '@angular/forms';
 
-export function main() {
+(function() {
   function syncValidator(_: any /** TODO #9100 */): any /** TODO #9100 */ { return null; }
   function asyncValidator(_: any /** TODO #9100 */) { return Promise.resolve(null); }
 
@@ -41,10 +41,38 @@ export function main() {
       expect(g.controls['password'].asyncValidator).toEqual(asyncValidator);
     });
 
-    it('should use controls', () => {
+    it('should use controls whose form state is a standalone value', () => {
       const g = b.group({'login': b.control('some value', syncValidator, asyncValidator)});
 
       expect(g.controls['login'].value).toEqual('some value');
+      expect(g.controls['login'].validator).toBe(syncValidator);
+      expect(g.controls['login'].asyncValidator).toBe(asyncValidator);
+    });
+
+    it('should support controls with no validators and whose form state is null', () => {
+      const g = b.group({'login': b.control(null)});
+      expect(g.controls['login'].value).toBeNull();
+      expect(g.controls['login'].validator).toBeNull();
+      expect(g.controls['login'].asyncValidator).toBeNull();
+    });
+
+    it('should support controls with validators and whose form state is null', () => {
+      const g = b.group({'login': b.control(null, syncValidator, asyncValidator)});
+      expect(g.controls['login'].value).toBeNull();
+      expect(g.controls['login'].validator).toBe(syncValidator);
+      expect(g.controls['login'].asyncValidator).toBe(asyncValidator);
+    });
+
+    it('should support controls with no validators and whose form state is undefined', () => {
+      const g = b.group({'login': b.control(undefined)});
+      expect(g.controls['login'].value).toBeNull();
+      expect(g.controls['login'].validator).toBeNull();
+      expect(g.controls['login'].asyncValidator).toBeNull();
+    });
+
+    it('should support controls with validators and whose form state is undefined', () => {
+      const g = b.group({'login': b.control(undefined, syncValidator, asyncValidator)});
+      expect(g.controls['login'].value).toBeNull();
       expect(g.controls['login'].validator).toBe(syncValidator);
       expect(g.controls['login'].asyncValidator).toBe(asyncValidator);
     });
@@ -59,12 +87,15 @@ export function main() {
 
     it('should create control arrays', () => {
       const c = b.control('three');
+      const e = b.control(null);
+      const f = b.control(undefined);
       const a = b.array(
-          ['one', ['two', syncValidator], c, b.array(['four'])], syncValidator, asyncValidator);
+          ['one', ['two', syncValidator], c, b.array(['four']), e, f], syncValidator,
+          asyncValidator);
 
-      expect(a.value).toEqual(['one', 'two', 'three', ['four']]);
+      expect(a.value).toEqual(['one', 'two', 'three', ['four'], null, null]);
       expect(a.validator).toBe(syncValidator);
       expect(a.asyncValidator).toBe(asyncValidator);
     });
   });
-}
+})();

@@ -50,3 +50,81 @@ keeps the outputs up-to-date as you save sources. Note this is
 new as of May 2017 and not very stable yet.
 
 [ibazel]: https://github.com/bazelbuild/bazel-watcher
+
+## Testing Angular
+
+- Test package in node: `bazel test packages/core/test:test`
+- Test package in karma: `bazel test packages/core/test:test_web`
+- Test all packages: `bazel test packages/...`
+
+You can use [ibazel] to get a "watch mode" that continuously
+keeps the outputs up-to-date as you save sources.
+
+### Debugging a Node Test
+
+- Open chrome at: [chrome://inspect](chrome://inspect)
+- Click on  `Open dedicated DevTools for Node` to launch a debugger.
+- Run test: `bazel test packages/core/test:test --config=debug`
+
+The process should automatically connect to the debugger.
+
+### Debugging a Node Test in VSCode
+
+First time setup:
+- Go to Debug > Add configuration (in the menu bar) to open `launch.json`
+- Add the following to the `configurations` array:
+
+```
+        {
+            "name": "Attach (inspect)",
+            "type": "node",
+            "request": "attach",
+            "port": 9229,
+            "address": "localhost",
+            "restart": false,
+            "sourceMaps": true,
+            "localRoot": "${workspaceRoot}",
+            "remoteRoot": null
+        },
+        {
+            "name": "Attach (no-sm,inspect)",
+            "type": "node",
+            "request": "attach",
+            "port": 9229,
+            "address": "localhost",
+            "restart": false,
+            "sourceMaps": false,
+            "localRoot": "${workspaceRoot}",
+            "remoteRoot": null
+        },
+```
+
+The easiest way to debug a test for now is to add a `debugger` statement in the code
+and launch the bazel corresponding test (`bazel test <target> --config=debug`).
+
+Bazel will wait on a connection. Go to the debug view (by clicking on the sidebar or
+Apple+Shift+D on Mac) and click on the green play icon next to the configuration name
+(ie `Attach (inspect)`).
+
+### Debugging a Karma Test
+
+- Run test: `bazel run packages/core/test:test_web`
+- Open chrome at: [http://localhost:9876/debug.html](http://localhost:9876/debug.html)
+- Open chrome inspector
+
+## FAQs
+
+Note: recent XCode update on Mac causes the following Bazel error
+```
+$ bazel build packages/...
+ERROR: /private/var/tmp/_bazel_iminar/9b8801a4939e9750a817dc0cb35bbbca/external/local_config_cc/BUILD:50:5: in apple_cc_toolchain rule @local_config_cc//:cc-compiler-darwin_x86_64: Xcode version must be specified to use an Apple CROSSTOOL
+ERROR: Analysis of target '//packages/core/test/render3:render3' failed; build aborted: Analysis of target '@local_config_cc//:cc-compiler-darwin_x86_64' failed; build aborted
+```
+To resolve the error do the following:
+```
+bazel clean --expunge
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license
+bazel build packages/...
+```
+Source: https://stackoverflow.com/questions/45276830/xcode-version-must-be-specified-to-use-an-apple-crosstool

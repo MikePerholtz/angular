@@ -127,6 +127,7 @@ export interface ExtraOptions {
     errorHandler?: ErrorHandler;
     initialNavigation?: InitialNavigation;
     onSameUrlNavigation?: 'reload' | 'ignore';
+    paramsInheritanceStrategy?: 'emptyOnly' | 'always';
     preloadingStrategy?: any;
     useHash?: boolean;
 }
@@ -207,6 +208,17 @@ export interface NavigationExtras {
 
 /** @stable */
 export declare class NavigationStart extends RouterEvent {
+    navigationTrigger?: 'imperative' | 'popstate' | 'hashchange';
+    restoredState?: {
+        navigationId: number;
+    } | null;
+    constructor(
+        id: number,
+        url: string,
+        navigationTrigger?: 'imperative' | 'popstate' | 'hashchange',
+        restoredState?: {
+        navigationId: number;
+    } | null);
     toString(): string;
 }
 
@@ -329,6 +341,7 @@ export declare class Router {
     readonly events: Observable<Event>;
     navigated: boolean;
     onSameUrlNavigation: 'reload' | 'ignore';
+    paramsInheritanceStrategy: 'emptyOnly' | 'always';
     routeReuseStrategy: RouteReuseStrategy;
     readonly routerState: RouterState;
     readonly url: string;

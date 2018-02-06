@@ -78,6 +78,15 @@ describe('ng program', () => {
     return {emitResult, program};
   }
 
+  function resolveFiles(rootNames: string[]) {
+    const preOptions = testSupport.createCompilerOptions();
+    const preHost = ts.createCompilerHost(preOptions);
+    // don't resolve symlinks
+    preHost.realpath = (f) => f;
+    const preProgram = ts.createProgram(rootNames, preOptions, preHost);
+    return preProgram.getSourceFiles().map(sf => sf.fileName);
+  }
+
   describe('reuse of old program', () => {
     it('should reuse generated code for libraries from old programs', () => {
       compileLib('lib');
@@ -316,7 +325,7 @@ describe('ng program', () => {
          'src/main.ts': `
         import {NgModule} from '@angular/core';
 
-        @NgModule(() => {if (1==1) return null as any;})
+        @NgModule((() => {if (1==1) return null as any;}) as any)
         export class SomeClassWithInvalidMetadata {}
       `,
        });
@@ -373,19 +382,29 @@ describe('ng program', () => {
     testSupport.writeFiles({
       'src/main.ts': createModuleAndCompSource('main'),
     });
-    const preOptions = testSupport.createCompilerOptions();
-    const preHost = ts.createCompilerHost(preOptions);
-    // don't resolve symlinks
-    preHost.realpath = (f) => f;
-    const preProgram =
-        ts.createProgram([path.resolve(testSupport.basePath, 'src/main.ts')], preOptions, preHost);
-    const allRootNames = preProgram.getSourceFiles().map(sf => sf.fileName);
+    const allRootNames = resolveFiles([path.resolve(testSupport.basePath, 'src/main.ts')]);
 
     // now do the actual test with noResolve
     const program = compile(undefined, {noResolve: true}, allRootNames);
 
     testSupport.shouldExist('built/src/main.ngfactory.js');
     testSupport.shouldExist('built/src/main.ngfactory.d.ts');
+  });
+
+  it('should work with tsx files', () => {
+    // create a temporary ts program to get the list of all files from angular...
+    testSupport.writeFiles({
+      'src/main.tsx': createModuleAndCompSource('main'),
+    });
+    const allRootNames = resolveFiles([path.resolve(testSupport.basePath, 'src/main.tsx')]);
+
+    const program = compile(undefined, {jsx: ts.JsxEmit.React}, allRootNames);
+
+    testSupport.shouldExist('built/src/main.js');
+    testSupport.shouldExist('built/src/main.d.ts');
+    testSupport.shouldExist('built/src/main.ngfactory.js');
+    testSupport.shouldExist('built/src/main.ngfactory.d.ts');
+    testSupport.shouldExist('built/src/main.ngsummary.json');
   });
 
   it('should emit also empty generated files depending on the options', () => {
@@ -412,14 +431,15 @@ describe('ng program', () => {
     });
     const host = ng.createCompilerHost({options});
     const written = new Map < string, {
-      original: ts.SourceFile[]|undefined;
+      original: ReadonlyArray<ts.SourceFile>|undefined;
       data: string;
     }
     > ();
 
     host.writeFile =
         (fileName: string, data: string, writeByteOrderMark: boolean,
-         onError?: (message: string) => void, sourceFiles?: ts.SourceFile[]) => {
+         onError: (message: string) => void|undefined,
+         sourceFiles: ReadonlyArray<ts.SourceFile>) => {
           written.set(fileName, {original: sourceFiles, data});
         };
     const program = ng.createProgram(
@@ -434,7 +454,8 @@ describe('ng program', () => {
                  sf => sf.fileName === path.join(testSupport.basePath, checks.originalFileName)))
           .toBe(true);
       if (checks.shouldBeEmpty) {
-        expect(writeData !.data).toBe('');
+        // The file should only contain comments (the preamble comment added by ngc).
+        expect(writeData !.data).toMatch(/^(\s*\/\*([^*]|\*[^/])*\*\/\s*)?$/);
       } else {
         expect(writeData !.data).not.toBe('');
       }
@@ -490,9 +511,9 @@ describe('ng program', () => {
     const host = ng.createCompilerHost({options});
     const writtenFileNames: string[] = [];
     const oldWriteFile = host.writeFile;
-    host.writeFile = (fileName, data, writeByteOrderMark) => {
+    host.writeFile = (fileName, data, writeByteOrderMark, onError, sourceFiles) => {
       writtenFileNames.push(fileName);
-      oldWriteFile(fileName, data, writeByteOrderMark);
+      oldWriteFile(fileName, data, writeByteOrderMark, onError, sourceFiles);
     };
 
     compile(/*oldProgram*/ undefined, options, /*rootNames*/ undefined, host);
@@ -890,6 +911,19 @@ describe('ng program', () => {
             `src/main.html(1,1): error TS100: Property 'nonExistent' does not exist on type 'MyComp'.`);
   });
 
+  it('should not report emit errors with noEmitOnError=false', () => {
+    testSupport.writeFiles({
+      'src/main.ts': `
+        @NgModule()
+      `
+    });
+    const options = testSupport.createCompilerOptions({noEmitOnError: false});
+    const host = ng.createCompilerHost({options});
+    const program1 = ng.createProgram(
+        {rootNames: [path.resolve(testSupport.basePath, 'src/main.ts')], options, host});
+    expect(program1.emit().diagnostics.length).toBe(0);
+  });
+
   describe('errors', () => {
     const fileWithStructuralError = `
       import {NgModule} from '@angular/core';
@@ -914,7 +948,7 @@ describe('ng program', () => {
 
       const structuralErrors = program.getNgStructuralDiagnostics();
       expect(structuralErrors.length).toBe(1);
-      expect(structuralErrors[0].messageText).toContain('Function calls are not supported.');
+      expect(structuralErrors[0].messageText).toContain('Function expressions are not supported');
     });
 
     it('should not throw on structural errors but collect them (loadNgStructureAsync)', (done) => {
@@ -927,28 +961,76 @@ describe('ng program', () => {
       program.loadNgStructureAsync().then(() => {
         const structuralErrors = program.getNgStructuralDiagnostics();
         expect(structuralErrors.length).toBe(1);
-        expect(structuralErrors[0].messageText).toContain('Function calls are not supported.');
+        expect(structuralErrors[0].messageText).toContain('Function expressions are not supported');
         done();
       });
     });
 
-    it('should be able to use a program with structural errors as oldProgram', () => {
-      testSupport.write('src/index.ts', fileWithStructuralError);
+    it('should include non-formatted errors (e.g. invalid templateUrl)', () => {
+      testSupport.write('src/index.ts', `
+        import {Component, NgModule} from '@angular/core';
+
+        @Component({
+          selector: 'my-component',
+          templateUrl: 'template.html',   // invalid template url
+        })
+        export class MyComponent {}
+
+        @NgModule({
+          declarations: [MyComponent]
+        })
+        export class MyModule {}
+      `);
 
       const options = testSupport.createCompilerOptions();
       const host = ng.createCompilerHost({options});
-      const program1 = ng.createProgram(
-          {rootNames: [path.resolve(testSupport.basePath, 'src/index.ts')], options, host});
-      expect(program1.getNgStructuralDiagnostics().length).toBe(1);
-
-      testSupport.write('src/index.ts', fileWithGoodContent);
-      const program2 = ng.createProgram({
+      const program = ng.createProgram({
         rootNames: [path.resolve(testSupport.basePath, 'src/index.ts')],
         options,
         host,
-        oldProgram: program1
       });
-      expectNoDiagnosticsInProgram(options, program2);
+
+      const structuralErrors = program.getNgStructuralDiagnostics();
+      expect(structuralErrors.length).toBe(1);
+      expect(structuralErrors[0].messageText).toContain('Couldn\'t resolve resource template.html');
     });
+
+    it('should be able report structural errors with noResolve:true and generateCodeForLibraries:false ' +
+           'even if getSourceFile throws for non existent files',
+       () => {
+         testSupport.write('src/index.ts', fileWithGoodContent);
+
+         // compile angular and produce .ngsummary.json / ngfactory.d.ts files
+         compile();
+
+         testSupport.write('src/ok.ts', fileWithGoodContent);
+         testSupport.write('src/error.ts', fileWithStructuralError);
+
+         // Make sure the ok.ts file is before the error.ts file,
+         // so we added a .ngfactory.ts file for it.
+         const allRootNames = resolveFiles(
+             ['src/ok.ts', 'src/error.ts'].map(fn => path.resolve(testSupport.basePath, fn)));
+
+         const options = testSupport.createCompilerOptions({
+           noResolve: true,
+           generateCodeForLibraries: false,
+         });
+         const host = ng.createCompilerHost({options});
+         const originalGetSourceFile = host.getSourceFile;
+         host.getSourceFile =
+             (fileName: string, languageVersion: ts.ScriptTarget,
+              onError?: ((message: string) => void) | undefined): ts.SourceFile => {
+               // We should never try to load .ngfactory.ts files
+               if (fileName.match(/\.ngfactory\.ts$/)) {
+                 throw new Error(`Non existent ngfactory file: ` + fileName);
+               }
+               return originalGetSourceFile.call(host, fileName, languageVersion, onError);
+             };
+         const program = ng.createProgram({rootNames: allRootNames, options, host});
+         const structuralErrors = program.getNgStructuralDiagnostics();
+         expect(structuralErrors.length).toBe(1);
+         expect(structuralErrors[0].messageText)
+             .toContain('Function expressions are not supported');
+       });
   });
 });

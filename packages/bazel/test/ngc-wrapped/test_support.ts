@@ -40,14 +40,14 @@ export function setup(
       bazelBin?: string,
       tsconfig?: string,
     } = {}): TestSupport {
-  const runfilesPath = process.env['RUNFILES'];
+  const runfilesPath = process.env['TEST_SRCDIR'];
 
   const basePath = makeTempDir(runfilesPath);
 
   const bazelBinPath = path.resolve(basePath, bazelBin);
   fs.mkdirSync(bazelBinPath);
 
-  const angularCorePath = path.resolve(runfilesPath, 'angular_src', 'packages', 'core');
+  const angularCorePath = path.resolve(runfilesPath, 'angular', 'packages', 'core');
   const ngFiles = listFilesRecursive(angularCorePath);
 
   const tsConfigJsonPath = path.resolve(basePath, tsconfig);
@@ -113,7 +113,8 @@ export function setup(
 
     const emptyTsConfig = ts.readConfigFile(
         path.resolve(
-            runfilesPath, 'angular', 'test', 'ngc-wrapped', 'empty', 'empty_tsconfig.json'),
+            runfilesPath, 'angular', 'packages', 'bazel', 'test', 'ngc-wrapped', 'empty',
+            'empty_tsconfig.json'),
         read);
 
     const tsconfig = createTsConfig({
@@ -150,7 +151,7 @@ function makeTempDir(baseDir): string {
 }
 
 export function listFilesRecursive(dir: string, fileList: string[] = []) {
-  fs.readdirSync(dir).map(file => {
+  fs.readdirSync(dir).forEach(file => {
     if (fs.statSync(path.join(dir, file)).isDirectory()) {
       listFilesRecursive(path.join(dir, file), fileList);
     } else {

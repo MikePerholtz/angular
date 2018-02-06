@@ -80,10 +80,24 @@ function coerceToAsyncValidator(
 
 export type FormHooks = 'change' | 'blur' | 'submit';
 
+/**
+ * @whatItDoes Interface for options provided to an {@link AbstractControl}.
+ *
+ * @experimental
+ */
 export interface AbstractControlOptions {
+  /**
+   * List of validators applied to control.
+   */
   validators?: ValidatorFn|ValidatorFn[]|null;
+  /**
+   * List of async validators applied to control.
+   */
   asyncValidators?: AsyncValidatorFn|AsyncValidatorFn[]|null;
-  updateOn?: FormHooks;
+  /**
+   * The event name for control to update upon.
+   */
+  updateOn?: 'change'|'blur'|'submit';
 }
 
 
@@ -253,7 +267,7 @@ export abstract class AbstractControl {
    * Sets the async validators that are active on this control. Calling this
    * will overwrite any existing async validators.
    */
-  setAsyncValidators(newValidator: AsyncValidatorFn|AsyncValidatorFn[]): void {
+  setAsyncValidators(newValidator: AsyncValidatorFn|AsyncValidatorFn[]|null): void {
     this.asyncValidator = coerceToAsyncValidator(newValidator);
   }
 
@@ -708,6 +722,9 @@ export class FormControl extends AbstractControl {
   /** @internal */
   _pendingValue: any;
 
+  /** @internal */
+  _pendingChange: any;
+
   constructor(
       formState: any = null,
       validatorOrOpts?: ValidatorFn|ValidatorFn[]|AbstractControlOptions|null,
@@ -755,9 +772,9 @@ export class FormControl extends AbstractControl {
   /**
    * Patches the value of a control.
    *
-   * This function is functionally the same as {@link FormControl#setValue} at this level.
-   * It exists for symmetry with {@link FormGroup#patchValue} on `FormGroups` and `FormArrays`,
-   * where it does behave differently.
+   * This function is functionally the same as {@link FormControl#setValue setValue} at this level.
+   * It exists for symmetry with {@link FormGroup#patchValue patchValue} on `FormGroups` and
+   * `FormArrays`, where it does behave differently.
    */
   patchValue(value: any, options: {
     onlySelf?: boolean,
@@ -801,6 +818,7 @@ export class FormControl extends AbstractControl {
     this.markAsPristine(options);
     this.markAsUntouched(options);
     this.setValue(this.value, options);
+    this._pendingChange = false;
   }
 
   /**
@@ -847,10 +865,12 @@ export class FormControl extends AbstractControl {
   /** @internal */
   _syncPendingControls(): boolean {
     if (this.updateOn === 'submit') {
-      this.setValue(this._pendingValue, {onlySelf: true, emitModelToViewChange: false});
       if (this._pendingDirty) this.markAsDirty();
       if (this._pendingTouched) this.markAsTouched();
-      return true;
+      if (this._pendingChange) {
+        this.setValue(this._pendingValue, {onlySelf: true, emitModelToViewChange: false});
+        return true;
+      }
     }
     return false;
   }
@@ -956,8 +976,8 @@ export class FormGroup extends AbstractControl {
   /**
    * Registers a control with the group's list of controls.
    *
-   * This method does not update value or validity of the control, so for
-   * most cases you'll want to use {@link FormGroup#addControl} instead.
+   * This method does not update the value or validity of the control, so for most cases you'll want
+   * to use {@link FormGroup#addControl addControl} instead.
    */
   registerControl(name: string, control: AbstractControl): AbstractControl {
     if (this.controls[name]) return this.controls[name];
@@ -1000,8 +1020,8 @@ export class FormGroup extends AbstractControl {
   /**
    * Check whether there is an enabled control with the given name in the group.
    *
-   * It will return false for disabled controls. If you'd like to check for
-   * existence in the group only, use {@link AbstractControl#get} instead.
+   * It will return false for disabled controls. If you'd like to check for existence in the group
+   * only, use {@link AbstractControl#get get} instead.
    */
   contains(controlName: string): boolean {
     return this.controls.hasOwnProperty(controlName) && this.controls[controlName].enabled;
@@ -1305,25 +1325,19 @@ export class FormArray extends AbstractControl {
     this._onCollectionChange();
   }
 
-  /**
-   * Insert a new {@link AbstractControl} at the given `index` in the array.
-   */
+  /** Insert a new {@link AbstractControl} at the given `index` in the array. */
   insert(index: number, control: AbstractControl): void {
     this.controls.splice(index, 0, control);
 
     this._registerControl(control);
     this.updateValueAndValidity();
-    this._onCollectionChange();
   }
 
-  /**
-   * Remove the control at the given `index` in the array.
-   */
+  /** Remove the control at the given `index` in the array. */
   removeAt(index: number): void {
     if (this.controls[index]) this.controls[index]._registerOnCollectionChange(() => {});
     this.controls.splice(index, 1);
     this.updateValueAndValidity();
-    this._onCollectionChange();
   }
 
   /**

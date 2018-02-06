@@ -8,6 +8,7 @@
 
 import {CompileDirectiveMetadata, CompileDirectiveSummary, CompileIdentifierMetadata, CompileNgModuleMetadata, CompileNgModuleSummary, CompilePipeMetadata, CompilePipeSummary, CompileProviderMetadata, CompileStylesheetMetadata, CompileSummaryKind, CompileTypeMetadata, CompileTypeSummary, componentFactoryName, flatten, identifierName, templateSourceUrl, tokenReference} from '../compile_metadata';
 import {CompilerConfig} from '../config';
+import {ConstantPool} from '../constant_pool';
 import {ViewEncapsulation} from '../core';
 import {MessageBundle} from '../i18n/message_bundle';
 import {Identifiers, createTokenForExternalReference} from '../identifiers';
@@ -18,11 +19,12 @@ import {NgModuleCompiler} from '../ng_module_compiler';
 import {OutputEmitter} from '../output/abstract_emitter';
 import * as o from '../output/output_ast';
 import {ParseError} from '../parse_util';
+import {compileComponent as compileIvyComponent, compileDirective as compileIvyDirective} from '../render3/r3_view_compiler';
 import {CompiledStylesheet, StyleCompiler} from '../style_compiler';
 import {SummaryResolver} from '../summary_resolver';
 import {TemplateAst} from '../template_parser/template_ast';
 import {TemplateParser} from '../template_parser/template_parser';
-import {OutputContext, ValueVisitor, syntaxError, visitValue} from '../util';
+import {OutputContext, ValueVisitor, error, syntaxError, visitValue} from '../util';
 import {TypeCheckCompiler} from '../view_compiler/type_check_compiler';
 import {ViewCompileResult, ViewCompiler} from '../view_compiler/view_compiler';
 
@@ -30,11 +32,12 @@ import {AotCompilerHost} from './compiler_host';
 import {AotCompilerOptions} from './compiler_options';
 import {GeneratedFile} from './generated_file';
 import {LazyRoute, listLazyRoutes, parseLazyRoute} from './lazy_routes';
+import {PartialModule} from './partial_module';
 import {StaticReflector} from './static_reflector';
 import {StaticSymbol} from './static_symbol';
 import {ResolvedStaticSymbol, StaticSymbolResolver} from './static_symbol_resolver';
 import {createForJitStub, serializeSummaries} from './summary_serializer';
-import {ngfactoryFilePath, splitTypescriptSuffix, summaryFileName, summaryForJitFileName, summaryForJitName} from './util';
+import {ngfactoryFilePath, normalizeGenFileSuffix, splitTypescriptSuffix, summaryFileName, summaryForJitFileName, summaryForJitName} from './util';
 
 enum StubEmitFlags {
   Basic = 1 << 0,
@@ -103,7 +106,7 @@ export class AotCompiler {
         genFileNames.push(summaryForJitFileName(file.fileName, true));
       }
     }
-    const fileSuffix = splitTypescriptSuffix(file.fileName, true)[1];
+    const fileSuffix = normalizeGenFileSuffix(splitTypescriptSuffix(file.fileName, true)[1]);
     file.directives.forEach((dirSymbol) => {
       const compMeta =
           this._metadataResolver.getNonNormalizedDirectiveMetadata(dirSymbol) !.metadata;
@@ -206,22 +209,26 @@ export class AotCompiler {
       // and they also cause TypeScript to include these files into the program too,
       // which will make them part of the analyzedFiles.
       const externalReferences: StaticSymbol[] = [
+        // Add references that are available from all the modules and imports.
         ...ngModuleMeta.transitiveModule.directives.map(d => d.reference),
         ...ngModuleMeta.transitiveModule.pipes.map(d => d.reference),
         ...ngModuleMeta.importedModules.map(m => m.type.reference),
         ...ngModuleMeta.exportedModules.map(m => m.type.reference),
+
+        // Add references that might be inserted by the template compiler.
+        ...this._externalIdentifierReferences([Identifiers.TemplateRef, Identifiers.ElementRef]),
       ];
+
       const externalReferenceVars = new Map<any, string>();
       externalReferences.forEach((ref, typeIndex) => {
-        if (this._host.isSourceFile(ref.filePath)) {
-          externalReferenceVars.set(ref, `_decl${ngModuleIndex}_${typeIndex}`);
-        }
+        externalReferenceVars.set(ref, `_decl${ngModuleIndex}_${typeIndex}`);
       });
       externalReferenceVars.forEach((varName, reference) => {
         outputCtx.statements.push(
             o.variable(varName)
                 .set(o.NULL_EXPR.cast(o.DYNAMIC_TYPE))
-                .toDeclStmt(o.expressionType(outputCtx.importExpr(reference))));
+                .toDeclStmt(o.expressionType(outputCtx.importExpr(
+                    reference, /* typeParams */ null, /* useSummaries */ false))));
       });
 
       if (emitFlags & StubEmitFlags.TypeCheck) {
@@ -248,6 +255,17 @@ export class AotCompiler {
     }
   }
 
+  private _externalIdentifierReferences(references: o.ExternalReference[]): StaticSymbol[] {
+    const result: StaticSymbol[] = [];
+    for (let reference of references) {
+      const token = createTokenForExternalReference(this._reflector, reference);
+      if (token.identifier) {
+        result.push(token.identifier.reference);
+      }
+    }
+    return result;
+  }
+
   private _createTypeCheckBlock(
       ctx: OutputContext, componentId: string, moduleMeta: CompileNgModuleMetadata,
       compMeta: CompileDirectiveMetadata, directives: CompileIdentifierMetadata[],
@@ -255,7 +273,7 @@ export class AotCompiler {
     const {template: parsedTemplate, pipes: usedPipes} =
         this._parseTemplate(compMeta, moduleMeta, directives);
     ctx.statements.push(...this._typeCheckCompiler.compileComponent(
-        componentId, compMeta, parsedTemplate, usedPipes, externalReferenceVars));
+        componentId, compMeta, parsedTemplate, usedPipes, externalReferenceVars, ctx));
   }
 
   emitMessageBundle(analyzeResult: NgAnalyzedModules, locale: string|null): MessageBundle {
@@ -289,6 +307,47 @@ export class AotCompiler {
     return messageBundle;
   }
 
+  emitAllPartialModules({ngModuleByPipeOrDirective, files}: NgAnalyzedModules): PartialModule[] {
+    // Using reduce like this is a select many pattern (where map is a select pattern)
+    return files.reduce<PartialModule[]>((r, file) => {
+      r.push(...this._emitPartialModule(
+          file.fileName, ngModuleByPipeOrDirective, file.directives, file.pipes, file.ngModules,
+          file.injectables));
+      return r;
+    }, []);
+  }
+
+  private _emitPartialModule(
+      fileName: string, ngModuleByPipeOrDirective: Map<StaticSymbol, CompileNgModuleMetadata>,
+      directives: StaticSymbol[], pipes: StaticSymbol[], ngModules: CompileNgModuleMetadata[],
+      injectables: StaticSymbol[]): PartialModule[] {
+    const classes: o.ClassStmt[] = [];
+
+    const context = this._createOutputContext(fileName);
+
+    // Process all components and directives
+    directives.forEach(directiveType => {
+      const directiveMetadata = this._metadataResolver.getDirectiveMetadata(directiveType);
+      if (directiveMetadata.isComponent) {
+        const module = ngModuleByPipeOrDirective.get(directiveType) !;
+        module ||
+            error(
+                `Cannot determine the module for component '${identifierName(directiveMetadata.type)}'`);
+
+        const {template: parsedTemplate} =
+            this._parseTemplate(directiveMetadata, module, module.transitiveModule.directives);
+        compileIvyComponent(context, directiveMetadata, parsedTemplate, this._reflector);
+      } else {
+        compileIvyDirective(context, directiveMetadata, this._reflector);
+      }
+    });
+
+    if (context.statements) {
+      return [{fileName, statements: [...context.constantPool.statements, ...context.statements]}];
+    }
+    return [];
+  }
+
   emitAllImpls(analyzeResult: NgAnalyzedModules): GeneratedFile[] {
     const {ngModuleByPipeOrDirective, files} = analyzeResult;
     const sourceModules = files.map(
@@ -302,7 +361,7 @@ export class AotCompiler {
       srcFileUrl: string, ngModuleByPipeOrDirective: Map<StaticSymbol, CompileNgModuleMetadata>,
       directives: StaticSymbol[], pipes: StaticSymbol[], ngModules: CompileNgModuleMetadata[],
       injectables: StaticSymbol[]): GeneratedFile[] {
-    const fileSuffix = splitTypescriptSuffix(srcFileUrl, true)[1];
+    const fileSuffix = normalizeGenFileSuffix(splitTypescriptSuffix(srcFileUrl, true)[1]);
     const generatedFiles: GeneratedFile[] = [];
 
     const outputCtx = this._createOutputContext(ngfactoryFilePath(srcFileUrl, true));
@@ -499,37 +558,40 @@ export class AotCompiler {
   }
 
   private _createOutputContext(genFilePath: string): OutputContext {
-    const importExpr = (symbol: StaticSymbol, typeParams: o.Type[] | null = null) => {
-      if (!(symbol instanceof StaticSymbol)) {
-        throw new Error(`Internal error: unknown identifier ${JSON.stringify(symbol)}`);
-      }
-      const arity = this._symbolResolver.getTypeArity(symbol) || 0;
-      const {filePath, name, members} = this._symbolResolver.getImportAs(symbol) || symbol;
-      const importModule = this._fileNameToModuleName(filePath, genFilePath);
+    const importExpr =
+        (symbol: StaticSymbol, typeParams: o.Type[] | null = null,
+         useSummaries: boolean = true) => {
+          if (!(symbol instanceof StaticSymbol)) {
+            throw new Error(`Internal error: unknown identifier ${JSON.stringify(symbol)}`);
+          }
+          const arity = this._symbolResolver.getTypeArity(symbol) || 0;
+          const {filePath, name, members} =
+              this._symbolResolver.getImportAs(symbol, useSummaries) || symbol;
+          const importModule = this._fileNameToModuleName(filePath, genFilePath);
 
-      // It should be good enough to compare filePath to genFilePath and if they are equal
-      // there is a self reference. However, ngfactory files generate to .ts but their
-      // symbols have .d.ts so a simple compare is insufficient. They should be canonical
-      // and is tracked by #17705.
-      const selfReference = this._fileNameToModuleName(genFilePath, genFilePath);
-      const moduleName = importModule === selfReference ? null : importModule;
+          // It should be good enough to compare filePath to genFilePath and if they are equal
+          // there is a self reference. However, ngfactory files generate to .ts but their
+          // symbols have .d.ts so a simple compare is insufficient. They should be canonical
+          // and is tracked by #17705.
+          const selfReference = this._fileNameToModuleName(genFilePath, genFilePath);
+          const moduleName = importModule === selfReference ? null : importModule;
 
-      // If we are in a type expression that refers to a generic type then supply
-      // the required type parameters. If there were not enough type parameters
-      // supplied, supply any as the type. Outside a type expression the reference
-      // should not supply type parameters and be treated as a simple value reference
-      // to the constructor function itself.
-      const suppliedTypeParams = typeParams || [];
-      const missingTypeParamsCount = arity - suppliedTypeParams.length;
-      const allTypeParams =
-          suppliedTypeParams.concat(new Array(missingTypeParamsCount).fill(o.DYNAMIC_TYPE));
-      return members.reduce(
-          (expr, memberName) => expr.prop(memberName),
-          <o.Expression>o.importExpr(
-              new o.ExternalReference(moduleName, name, null), allTypeParams));
-    };
+          // If we are in a type expression that refers to a generic type then supply
+          // the required type parameters. If there were not enough type parameters
+          // supplied, supply any as the type. Outside a type expression the reference
+          // should not supply type parameters and be treated as a simple value reference
+          // to the constructor function itself.
+          const suppliedTypeParams = typeParams || [];
+          const missingTypeParamsCount = arity - suppliedTypeParams.length;
+          const allTypeParams =
+              suppliedTypeParams.concat(new Array(missingTypeParamsCount).fill(o.DYNAMIC_TYPE));
+          return members.reduce(
+              (expr, memberName) => expr.prop(memberName),
+              <o.Expression>o.importExpr(
+                  new o.ExternalReference(moduleName, name, null), allTypeParams));
+        };
 
-    return {statements: [], genFilePath, importExpr};
+    return {statements: [], genFilePath, importExpr, constantPool: new ConstantPool()};
   }
 
   private _fileNameToModuleName(importedFilePath: string, containingFilePath: string): string {
@@ -709,15 +771,15 @@ export function analyzeFile(
         } else if (metadataResolver.isPipe(symbol)) {
           isNgSymbol = true;
           pipes.push(symbol);
-        } else if (metadataResolver.isInjectable(symbol)) {
-          isNgSymbol = true;
-          injectables.push(symbol);
-        } else {
+        } else if (metadataResolver.isNgModule(symbol)) {
           const ngModule = metadataResolver.getNgModuleMetadata(symbol, false);
           if (ngModule) {
             isNgSymbol = true;
             ngModules.push(ngModule);
           }
+        } else if (metadataResolver.isInjectable(symbol)) {
+          isNgSymbol = true;
+          injectables.push(symbol);
         }
       }
       if (!isNgSymbol) {
